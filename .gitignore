@@ -1,0 +1,27 @@
+# Build output and frontend dependencies.
+/bin/
+/loom
+/loom.exe
+/web/dist/
+/web/node_modules/
+/web/.vite/
+/web/coverage/
+/bridge/claude/node_modules/
+/bridge/claude/dist/
+
+# Local runtime state and credentials.
+/data/
+/config.local.toml
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log

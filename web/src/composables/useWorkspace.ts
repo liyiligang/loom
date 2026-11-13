@@ -1,57 +1,78 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { request } from '../api'
-import type { Bootstrap, Detail, DiscoveryRun } from '../types'
+import { mergeDetail, refreshScope } from './sessionSnapshot'
+import type { Bootstrap, Detail, DiscoveryRun, WorkspaceEvent } from '../types'
 
-export function useWorkspace() {
+export function useWorkspace(sessionId?: () => string) {
   const route = useRoute()
-  const snapshot = ref<Bootstrap>({ version: '0.1.0', cursor: 0, endpoints: [], sessions: [], capabilities: { codex: true, claude: false, mdns: false } })
+  const snapshot = ref<Bootstrap>({ version: '0.1.0', cursor: 0, endpoints: [], projects: [], requirements: [], sessions: [], capabilities: { codex: true, claude: false, mdns: false } })
   const detail = ref<Detail>()
   const discovery = ref<DiscoveryRun>()
   const online = ref(false)
   const loading = ref(true)
   const error = ref('')
-  const selectedId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
+  const selectedId = computed(() => sessionId ? sessionId() : typeof route.params.id === 'string' ? route.params.id : '')
   let socket: WebSocket | undefined
   let disposed = false
   let reloadTimer: ReturnType<typeof setTimeout> | undefined
   let retryTimer: ReturnType<typeof setTimeout> | undefined
   let discoveryTimer: ReturnType<typeof setTimeout> | undefined
   let refreshing: Promise<void> | undefined
-  let dirty = false
+  let dirtyBootstrap = false
+  let dirtyDetail = false
+  let fullDetail = false
   let revision = 0
 
-  async function loadDetail() {
+  async function loadDetail(full = true) {
     const id = selectedId.value
     const version = ++revision
     if (!id) { detail.value = undefined; return }
     try {
-      const value = await request<Detail>(`/sessions/${id}`)
-      if (version === revision && selectedId.value === id) { detail.value = value; error.value = '' }
+      const current = detail.value?.session.id === id ? detail.value : undefined
+      const query = !full && current ? `?afterCursor=${current.cursor}` : ''
+      const value = await request<Detail>(`/sessions/${id}${query}`)
+      if (version === revision && selectedId.value === id) {
+        detail.value = mergeDetail(current, value)
+        const sessions = snapshot.value.sessions.filter(session => session.id !== id)
+        snapshot.value.sessions = [...sessions, detail.value.session].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        error.value = ''
+      }
     } catch (cause) { if (version === revision) error.value = cause instanceof Error ? cause.message : 'Could not load the session.' }
   }
 
-  async function refresh() {
-    dirty = true
+  async function refresh(scope = { bootstrap: true, detail: true, full: true }) {
+    dirtyBootstrap ||= scope.bootstrap
+    dirtyDetail ||= scope.detail
+    fullDetail ||= scope.full
     if (refreshing) return refreshing
     refreshing = (async () => {
       try {
-        while (dirty && !disposed) {
-          dirty = false
-          snapshot.value = await request<Bootstrap>('/bootstrap')
+        while ((dirtyBootstrap || dirtyDetail) && !disposed) {
+          const bootstrap = dirtyBootstrap
+          const loadSession = dirtyDetail
+          const full = fullDetail
+          dirtyBootstrap = dirtyDetail = fullDetail = false
+          if (bootstrap) snapshot.value = await request<Bootstrap>('/bootstrap')
           error.value = ''
-          await loadDetail()
+          if (loadSession) await loadDetail(full)
         }
       } finally { loading.value = false }
     })()
     try { await refreshing } finally { refreshing = undefined }
   }
 
-  function scheduleRefresh() {
+  let scheduledScope = { bootstrap: false, detail: false, full: false }
+  function scheduleRefresh(scope: typeof scheduledScope) {
+    scheduledScope.bootstrap ||= scope.bootstrap
+    scheduledScope.detail ||= scope.detail
+    scheduledScope.full ||= scope.full
     if (reloadTimer || disposed) return
     reloadTimer = setTimeout(async () => {
       reloadTimer = undefined
-      try { await refresh() } catch { online.value = false }
+      const scope = scheduledScope
+      scheduledScope = { bootstrap: false, detail: false, full: false }
+      try { await refresh(scope) } catch { online.value = false }
     }, 120)
   }
 
@@ -64,7 +85,10 @@ export function useWorkspace() {
       address.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
       socket = new WebSocket(address)
       socket.onopen = () => { online.value = true }
-      socket.onmessage = () => scheduleRefresh()
+      socket.onmessage = message => {
+        try { scheduleRefresh(refreshScope(JSON.parse(message.data) as WorkspaceEvent, selectedId.value)) }
+        catch { socket?.close() }
+      }
       socket.onclose = () => { online.value = false; if (!disposed) retryTimer = setTimeout(connect, 1500) }
       socket.onerror = () => socket?.close()
     } catch {
@@ -89,7 +113,7 @@ export function useWorkspace() {
   }
 
   watch(selectedId, () => { detail.value = undefined; void loadDetail() })
-  onMounted(async () => { await connect(); if (!disposed && snapshot.value) { try { await discover() } catch { /* Connection status already explains server availability. */ } } })
+  onMounted(connect)
   onUnmounted(() => {
     disposed = true
     socket?.close()

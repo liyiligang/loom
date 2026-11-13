@@ -26,4 +26,4 @@ Spec count: four initial findings and two follow-up cases addressed. The most se
 
 ## Verification limit
 
-The findings were addressed in source and followed by build, protocol, and browser checks. Failure-path behavioral coverage remains outstanding as described in `VALIDATION.md`.
+The findings were addressed in source and followed by build, protocol, and browser checks. The subsequent reliability increment adds 13 HTTP/WebSocket integration tests and four frontend tests, including failure paths and final-output preservation. Real-service task validation and further failure coverage remain outstanding as described in `VALIDATION.md`.

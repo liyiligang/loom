@@ -1,45 +1,62 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Terminal, Wrench, FileDiff, Brain, ChevronRight } from '@lucide/vue'
-import MarkdownIt from 'markdown-it'
-import DOMPurify from 'dompurify'
+import { Terminal, Wrench, FileDiff, Brain, Check, CircleAlert, LoaderCircle } from '@lucide/vue'
+import AnimatedDisclosure from './AnimatedDisclosure.vue'
+import StreamingMarkdown from './StreamingMarkdown.vue'
 import type { Entry } from '../types'
+import { useI18n } from '../i18n'
 
-const props = defineProps<{ entry: Entry }>()
-const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
-const content = computed(() => DOMPurify.sanitize(markdown.render(props.entry.text), { FORBID_TAGS: ['img', 'style'] }))
+const props = withDefaults(defineProps<{ entry: Entry; agentName?: string }>(), { agentName: 'Codex' })
+const { t, locale, stateLabel } = useI18n()
 const activityType = computed(() => String(props.entry.detail?.type ?? 'activity'))
 const activityTitle = computed(() => {
   const detail = props.entry.detail
   if (detail?.command) return String(detail.command)
-  if (activityType.value === 'fileChange') return 'File changes'
-  if (activityType.value === 'reasoning') return 'Reasoning'
-  if (activityType.value === 'plan') return 'Plan'
+  if (activityType.value === 'fileChange') return t('entry.fileChanges')
+  if (activityType.value === 'reasoning') return t('entry.reasoning')
+  if (activityType.value === 'plan') return t('entry.plan')
   if (detail?.tool) return String(detail.tool)
-  return 'Agent activity'
+  return t('entry.activity')
 })
 const icon = computed(() => activityType.value === 'commandExecution' ? Terminal : activityType.value === 'fileChange' ? FileDiff : activityType.value === 'reasoning' ? Brain : Wrench)
+const activityStatus = computed(() => String(props.entry.detail?.status ?? props.entry.status))
+const activityState = computed(() => {
+  if (['running', 'inProgress', 'streaming'].includes(activityStatus.value)) return 'running'
+  if (['failed', 'error'].includes(activityStatus.value)) return 'failed'
+  if (['completed', 'succeeded', 'success'].includes(activityStatus.value)) return 'completed'
+  return 'waiting'
+})
+const writing = computed(() => props.entry.role !== 'user' && ['running', 'inProgress', 'streaming'].includes(props.entry.status))
 </script>
 
 <template>
   <article v-if="entry.kind === 'message'" class="message" :class="entry.role">
     <div class="message-heading">
-      <span class="avatar" :class="entry.role">{{ entry.role === 'user' ? 'Y' : 'C' }}</span>
-      <strong>{{ entry.role === 'user' ? 'You' : 'Codex' }}</strong>
-      <time :datetime="entry.createdAt">{{ new Date(entry.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
-      <span v-if="entry.status !== 'completed'" class="stream-label">Writing</span>
+      <span class="avatar" :class="entry.role">{{ entry.role === 'user' ? t('entry.youAvatar') : 'C' }}</span>
+      <strong>{{ entry.role === 'user' ? t('entry.you') : agentName }}</strong>
+      <time :datetime="entry.createdAt">{{ new Date(entry.createdAt).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }) }}</time>
+      <Transition name="fade"><span v-if="writing" class="stream-label"><span class="writing-dots" aria-hidden="true"><i></i><i></i><i></i></span>{{ t('entry.writing') }}</span></Transition>
     </div>
     <div v-if="entry.role === 'user'" class="user-text">{{ entry.text }}</div>
-    <div v-else class="markdown" v-html="content"></div>
-    <p v-if="entry.truncated" class="subtle">Output reached the 1 MiB display limit.</p>
+    <StreamingMarkdown v-else :text="entry.text" :status="entry.status" />
+    <p v-if="entry.truncated" class="subtle">{{ t('entry.truncated') }}</p>
   </article>
-  <details v-else class="activity">
-    <summary><component :is="icon" :size="16" /><span>{{ activityTitle }}</span><small>{{ entry.detail?.status ?? entry.status }}</small><ChevronRight :size="15" class="disclosure-icon" /></summary>
+  <AnimatedDisclosure v-else class="activity" :class="`activity-${activityState}`">
+    <template #summary>
+      <component :is="icon" :size="16" class="activity-type-icon" aria-hidden="true" />
+      <span class="activity-title" :title="activityTitle">{{ activityTitle }}</span>
+      <span class="activity-status" :class="activityState">
+        <Transition name="status" mode="out-in">
+          <component :is="activityState === 'running' ? LoaderCircle : activityState === 'completed' ? Check : CircleAlert" v-if="activityState !== 'waiting'" :key="activityState" :size="14" :class="{ spinning: activityState === 'running' }" aria-hidden="true" />
+        </Transition>
+        <small>{{ stateLabel(activityStatus) }}</small>
+      </span>
+    </template>
     <div class="activity-body">
       <pre v-if="entry.text">{{ entry.text }}</pre>
-      <pre v-if="entry.detail">{{ JSON.stringify(entry.detail, null, 2) }}</pre>
-      <p v-if="!entry.text && !entry.detail" class="subtle">Waiting for execution details.</p>
-      <p v-if="entry.truncated" class="subtle">Output reached the 1 MiB display limit.</p>
+      <details v-if="entry.detail" class="raw-details"><summary>{{ t('entry.executionDetails') }}</summary><pre>{{ JSON.stringify(entry.detail, null, 2) }}</pre></details>
+      <p v-if="!entry.text && !entry.detail" class="subtle">{{ t('entry.waitingDetails') }}</p>
+      <p v-if="entry.truncated" class="subtle">{{ t('entry.truncated') }}</p>
     </div>
-  </details>
+  </AnimatedDisclosure>
 </template>

@@ -7,13 +7,18 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/liyiligang/loom/internal/credentials"
+	"github.com/liyiligang/loom/internal/credentialtool"
+	"github.com/liyiligang/loom/internal/local"
 	"github.com/liyiligang/loom/internal/model"
+	"github.com/liyiligang/loom/internal/provider"
 	"github.com/liyiligang/loom/internal/provider/codex"
 	"github.com/liyiligang/loom/internal/storage"
 )
@@ -29,42 +34,85 @@ func problem(code, message string, status int) error {
 }
 
 type connection struct {
-	client     *codex.Client
+	client     provider.Connection
 	generation string
 }
 
 type Service struct {
-	mu         sync.Mutex
-	ctx        context.Context
-	cancel     context.CancelFunc
-	workers    sync.WaitGroup
-	store      *storage.Store
-	secrets    *credentials.Store
-	data       model.Data
-	clients    map[string]*connection
-	attempts   map[string]bool
-	subscribed map[string]string
-	restoring  map[string]bool
-	changed    chan struct{}
-	cursor     int64
-	fault      error
-	Fatal      chan error
+	localManager         local.Manager
+	localAgents          []local.Agent
+	localState           string
+	defaultDirectory     string
+	mu                   sync.Mutex
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	workers              sync.WaitGroup
+	store                *storage.Store
+	secrets              *credentials.Store
+	vault                *credentials.Vault
+	credentialBroker     *credentialtool.Broker
+	credentialUses       map[string]credentialUse
+	data                 model.Data
+	clients              map[string]*connection
+	attempts             map[string]bool
+	localRetry           map[string]bool
+	subscribed           map[string]string
+	restoring            map[string]bool
+	changed              chan struct{}
+	cursor               int64
+	fault                error
+	Fatal                chan error
+	revisions            map[string]int64
+	preparingWorkspaces  map[string]bool
+	creatingSessions     map[string]int
+	requirementChatLocks sync.Map
+	workflowLocks        sync.Map
+	materialLocks        sync.Map
+	skillLocks           sync.Map
+	materialWrites       map[string]int
 }
 
-func New(ctx context.Context, store *storage.Store, secrets *credentials.Store) (*Service, error) {
+func New(ctx context.Context, store *storage.Store, secrets *credentials.Store, options ...Option) (*Service, error) {
 	data, err := store.Load()
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	s := &Service{ctx: ctx, cancel: cancel, store: store, secrets: secrets, data: data,
-		clients: make(map[string]*connection), attempts: make(map[string]bool), subscribed: make(map[string]string), restoring: make(map[string]bool), changed: make(chan struct{}), Fatal: make(chan error, 1)}
+		clients: make(map[string]*connection), attempts: make(map[string]bool), localRetry: make(map[string]bool), subscribed: make(map[string]string), restoring: make(map[string]bool), changed: make(chan struct{}), Fatal: make(chan error, 1)}
+	s.localManager = local.New(store.Directory())
+	vaultDirectory := filepath.Join(store.Directory(), "credentials")
+	if len(data.Secrets) != 0 {
+		if _, err := os.Lstat(filepath.Join(vaultDirectory, "vault.key")); err != nil {
+			cancel()
+			return nil, errors.New("Credential storage key is unavailable. Restore it with its matching database backup.")
+		}
+	}
+	s.vault, err = credentials.NewVault(vaultDirectory)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	s.preparingWorkspaces = make(map[string]bool)
+	s.creatingSessions = make(map[string]int)
+	s.materialWrites = make(map[string]int)
+	s.localState = "pending"
+	s.localAgents = []local.Agent{}
+	s.defaultDirectory, _ = os.Getwd()
+	for _, option := range options {
+		option(s)
+	}
 	s.cursor, err = store.Cursor()
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	var recovered []any
+	recovered, err := s.backfillNavigation()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	s.backfillSessionWorkspaces()
 	for _, endpoint := range data.Endpoints {
 		endpoint.State = "offline"
 		recovered = append(recovered, endpoint)
@@ -92,14 +140,36 @@ func New(ctx context.Context, store *storage.Store, secrets *credentials.Store) 
 		}
 		s.cursor, _ = store.Cursor()
 	}
+	s.revisions = make(map[string]int64)
+	for _, turn := range data.Turns {
+		s.revisions[turn.ID] = s.cursor
+	}
+	for _, entry := range data.Entries {
+		s.revisions[entry.ID] = s.cursor
+	}
+	for _, interaction := range data.Interactions {
+		s.revisions[interaction.ID] = s.cursor
+	}
+	s.credentialUses = make(map[string]credentialUse)
+	s.credentialBroker, err = credentialtool.New(s, nil)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 	return s, nil
 }
 
 func (s *Service) Start() {
+	s.ScanLocal()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.workers.Add(1)
+	go s.runRequirementWorkflows()
+	for _, requirement := range s.data.Requirements {
+		s.prepareWorkspaceLocked(requirement.ID)
+	}
 	for _, endpoint := range s.data.Endpoints {
-		if endpoint.AutoConnect {
+		if endpoint.AutoConnect && !endpoint.Local {
 			s.connectLocked(endpoint)
 		}
 	}
@@ -107,6 +177,7 @@ func (s *Service) Start() {
 
 func (s *Service) Close() {
 	s.cancel()
+	s.credentialBroker.Close()
 	s.mu.Lock()
 	for _, connection := range s.clients {
 		connection.client.Close()
@@ -130,6 +201,16 @@ func (s *Service) commitLocked(kind, id string, values ...any) error {
 		return s.fault
 	}
 	s.cursor = cursor
+	for _, value := range values {
+		switch value := value.(type) {
+		case *model.Turn:
+			s.revisions[value.ID] = cursor
+		case *model.Entry:
+			s.revisions[value.ID] = cursor
+		case *model.Interaction:
+			s.revisions[value.ID] = cursor
+		}
+	}
 	close(s.changed)
 	s.changed = make(chan struct{})
 	return nil
@@ -144,37 +225,56 @@ func (s *Service) Bootstrap() ([]byte, error) {
 	sessions := append([]*model.Session{}, s.data.Sessions...)
 	sort.SliceStable(sessions, func(i, j int) bool { return sessions[i].UpdatedAt > sessions[j].UpdatedAt })
 	return json.Marshal(map[string]any{"version": model.Version, "cursor": s.cursor,
-		"endpoints": append([]*model.Endpoint{}, s.data.Endpoints...), "sessions": sessions,
-		"capabilities": map[string]bool{"codex": true, "claude": false, "mdns": false}})
+		"modelCatalog": s.data.ModelCatalog,
+		"endpoints":    append([]*model.Endpoint{}, s.data.Endpoints...), "sessions": sessions,
+		"projects": append([]*model.Project{}, s.data.Projects...), "requirements": append([]*model.Requirement{}, s.data.Requirements...),
+		"workflows":    append([]*model.RequirementWorkflow{}, s.data.Workflows...),
+		"writers":      s.writersLocked(),
+		"local":        LocalSnapshot{State: s.localState, Confirmed: s.data.LocalSetup.Confirmed, Agents: s.localAgents, DefaultDirectory: s.defaultDirectory},
+		"capabilities": map[string]bool{"codex": true, "claude": true, "mdns": false}})
 }
 
 func (s *Service) Detail(id string) ([]byte, error) {
+	return s.detail(id, -1)
+}
+
+// Changes returns current projections touched after a committed cursor. Revisions
+// are rebuilt on restart, so pre-restart subscribers receive a complete refresh.
+func (s *Service) Changes(id string, after int64) ([]byte, error) {
+	return s.detail(id, after)
+}
+
+func (s *Service) detail(id string, after int64) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if after > s.cursor {
+		return nil, problem("invalid_cursor", "The cursor is ahead of the controller. Reload the session.", 409)
+	}
 	session := s.session(id)
 	if session == nil {
 		return nil, problem("not_found", "Session not found.", 404)
 	}
 	detail := model.Detail{Session: session, Turns: []*model.Turn{}, Entries: []*model.Entry{}, Interactions: []*model.Interaction{}}
 	for _, turn := range s.data.Turns {
-		if turn.SessionID == id {
+		if turn.SessionID == id && (after < 0 || s.revisions[turn.ID] > after) {
 			detail.Turns = append(detail.Turns, turn)
 		}
 	}
 	for _, entry := range s.data.Entries {
-		if entry.SessionID == id {
+		if entry.SessionID == id && (after < 0 || s.revisions[entry.ID] > after) {
 			detail.Entries = append(detail.Entries, entry)
 		}
 	}
 	for _, interaction := range s.data.Interactions {
-		if interaction.SessionID == id {
+		if interaction.SessionID == id && (after < 0 || s.revisions[interaction.ID] > after) {
 			detail.Interactions = append(detail.Interactions, interaction)
 		}
 	}
 	return json.Marshal(struct {
 		model.Detail
-		Cursor int64 `json:"cursor"`
-	}{detail, s.cursor})
+		Cursor  int64 `json:"cursor"`
+		Partial bool  `json:"partial"`
+	}{detail, s.cursor, after >= 0})
 }
 
 func (s *Service) endpoint(id string) *model.Endpoint {
@@ -251,6 +351,9 @@ func (s *Service) SaveEndpoint(id string, input EndpointInput) (string, error) {
 	if id != "" && endpoint == nil {
 		return "", problem("not_found", "Service not found.", 404)
 	}
+	if endpoint != nil && endpoint.Local {
+		return "", problem("local_managed", "Local agent connections are managed automatically. Detect installed agents again to update them.", 409)
+	}
 	if endpoint != nil {
 		for _, session := range s.data.Sessions {
 			if session.EndpointID == id && session.ActiveTurn != "" {
@@ -316,6 +419,9 @@ func (s *Service) Disconnect(id string) error {
 
 func (s *Service) connectLocked(endpoint *model.Endpoint) {
 	if s.attempts[endpoint.ID] || s.ctx.Err() != nil {
+		if endpoint.Local && s.clients[endpoint.ID] == nil && s.ctx.Err() == nil {
+			s.localRetry[endpoint.ID] = true
+		}
 		return
 	}
 	s.attempts[endpoint.ID] = true
@@ -325,7 +431,17 @@ func (s *Service) connectLocked(endpoint *model.Endpoint) {
 
 func (s *Service) connectionLoop(id string) {
 	defer s.workers.Done()
-	defer func() { s.mu.Lock(); delete(s.attempts, id); s.mu.Unlock() }()
+	defer func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.attempts, id)
+		if s.localRetry[id] {
+			delete(s.localRetry, id)
+			if endpoint := s.endpoint(id); endpoint != nil && endpoint.AutoConnect {
+				s.connectLocked(endpoint)
+			}
+		}
+	}()
 	backoff := time.Second
 	for s.ctx.Err() == nil {
 		s.mu.Lock()
@@ -335,18 +451,34 @@ func (s *Service) connectionLoop(id string) {
 			return
 		}
 		address := endpoint.Address
+		isLocal := endpoint.Local
+		agent, available := s.localAgentLocked(endpoint.Provider)
 		endpoint.State, endpoint.Error = "connecting", ""
 		if s.commitLocked("endpoint.updated", id, endpoint) != nil {
 			s.mu.Unlock()
 			return
 		}
 		s.mu.Unlock()
-		token, err := s.secrets.Read(id)
-		var client *codex.Client
-		if err == nil {
-			ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
-			client, err = codex.Dial(ctx, address, token)
-			cancel()
+		var client provider.Connection
+		var err error
+		if isLocal {
+			if !available {
+				err = errors.New("The local agent is unavailable. Detect installed agents again.")
+			} else {
+				client, err = s.localManager.Connect(s.ctx, agent)
+			}
+		} else {
+			token, credentialError := s.secrets.Read(id)
+			err = credentialError
+			if err == nil {
+				ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+				client, err = codex.Dial(ctx, address, token)
+				cancel()
+			}
+		}
+		if err != nil {
+			// Concrete adapters return typed nil pointers on startup failure.
+			client = nil
 		}
 		s.mu.Lock()
 		endpoint = s.endpoint(id)
@@ -363,7 +495,7 @@ func (s *Service) connectionLoop(id string) {
 		if err == nil {
 			current := &connection{client: client, generation: model.ID()}
 			s.clients[id] = current
-			endpoint.State, endpoint.Version, endpoint.Error = "ready", client.Version, ""
+			endpoint.State, endpoint.Version, endpoint.Error = "ready", client.Version(), ""
 			s.commitLocked("endpoint.updated", id, endpoint)
 			var sessions []string
 			for _, session := range s.data.Sessions {
@@ -373,11 +505,11 @@ func (s *Service) connectionLoop(id string) {
 			}
 			s.mu.Unlock()
 			s.workers.Add(1)
+			eventsDone := make(chan struct{})
 			go func() {
 				defer s.workers.Done()
-				for packet := range client.Events {
-					s.handle(id, current, packet)
-				}
+				defer close(eventsDone)
+				s.consume(id, current)
 			}()
 			for _, sessionID := range sessions {
 				if s.ctx.Err() == nil {
@@ -385,10 +517,11 @@ func (s *Service) connectionLoop(id string) {
 				}
 			}
 			select {
-			case <-client.Done:
+			case <-client.Done():
 			case <-s.ctx.Done():
 				client.Close()
 			}
+			<-eventsDone
 			s.mu.Lock()
 			if s.clients[id] == current {
 				delete(s.clients, id)
@@ -398,9 +531,12 @@ func (s *Service) connectionLoop(id string) {
 			backoff = time.Second
 		} else {
 			endpoint.State, endpoint.Error = "reconnecting", err.Error()
-			stop := strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "compatible") || strings.Contains(err.Error(), "credential")
+			stop := isLocal || strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "compatible") || strings.Contains(err.Error(), "credential")
 			if stop {
 				endpoint.State = "auth_required"
+				if isLocal {
+					endpoint.State = "unavailable"
+				}
 				if strings.Contains(err.Error(), "compatible") {
 					endpoint.State = "incompatible"
 				}

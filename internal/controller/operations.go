@@ -4,17 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/liyiligang/loom/internal/model"
-	"github.com/liyiligang/loom/internal/provider/codex"
+	"github.com/liyiligang/loom/internal/provider"
+	"github.com/liyiligang/loom/internal/workspace"
 )
 
 type SessionInput struct {
-	EndpointID string `json:"endpointId"`
-	Title      string `json:"title"`
-	Cwd        string `json:"cwd"`
-	Model      string `json:"model"`
+	AccessMode    provider.AccessMode `json:"accessMode"`
+	BranchID      string              `json:"branchId"`
+	RequirementID string              `json:"requirementId"`
+	EndpointID    string              `json:"endpointId"`
+	Title         string              `json:"title"`
+	Cwd           string              `json:"cwd"`
+	Model         string              `json:"model"`
 }
 
 func (s *Service) readyLocked(endpointID string) (*connection, error) {
@@ -30,12 +36,91 @@ func (s *Service) readyLocked(endpointID string) (*connection, error) {
 }
 
 func (s *Service) CreateSession(ctx context.Context, input SessionInput) (string, error) {
+	return s.createSession(ctx, input, "")
+}
+
+func (s *Service) createSession(ctx context.Context, input SessionInput, purpose string) (string, error) {
+	if input.AccessMode != "" && !input.AccessMode.Valid() {
+		return "", invalidAccessMode()
+	}
+	input.AccessMode = input.AccessMode.Effective()
 	input.Cwd, input.Title, input.Model = strings.TrimSpace(input.Cwd), strings.TrimSpace(input.Title), strings.TrimSpace(input.Model)
-	if input.Cwd == "" || len(input.Cwd) > 4096 || strings.ContainsRune(input.Cwd, 0) || len(input.Title) > 120 || len(input.Model) > 120 {
+	s.mu.Lock()
+	s.creatingSessions[input.RequirementID]++
+	defer func() { s.mu.Lock(); s.creatingSessions[input.RequirementID]--; s.mu.Unlock() }()
+	endpoint := s.endpoint(input.EndpointID)
+	local := endpoint != nil && endpoint.Local
+	var binding *workspace.Binding
+	var modelSelection *string
+	if input.RequirementID != "" {
+		requirement, err := s.requirementForEndpointLocked(input.RequirementID, endpoint)
+		if err != nil {
+			s.mu.Unlock()
+			return "", err
+		}
+		modelSelection = s.scopeModelLocked(requirement, endpoint.Provider)
+		if modelSelection != nil {
+			input.Model = *modelSelection
+		}
+		if purpose != "requirement" {
+			binding, input.BranchID, err = s.executionWorkspaceLocked(requirement, input.BranchID, input.Cwd)
+			if err != nil {
+				s.mu.Unlock()
+				return "", err
+			}
+		} else {
+			input.AccessMode = requirement.ConversationAccessMode.Effective()
+		}
+		if binding != nil {
+			input.Cwd = binding.Directory
+		} else if input.Cwd == "" {
+			input.Cwd = s.project(requirement.ProjectID).Cwd
+		}
+	}
+	if local && input.Cwd == "" {
+		input.Cwd = s.defaultDirectory
+	}
+	if input.RequirementID == "" && endpoint != nil {
+		for _, project := range s.data.Projects {
+			if project.Local == local && (local || project.EndpointID == endpoint.ID) && project.Cwd == projectDirectory(input.Cwd, local) {
+				if value, ok := project.Models[endpoint.Provider]; ok {
+					modelSelection = &value
+					input.Model = value
+				}
+				break
+			}
+		}
+	}
+	s.mu.Unlock()
+	if binding != nil {
+		if err := workspace.Verify(ctx, *binding); err != nil {
+			return "", problem("workspace_unavailable", err.Error(), 409)
+		}
+	}
+	if input.Cwd == "" || len(input.Cwd) > 4096 || strings.ContainsRune(input.Cwd, 0) || (input.Title != "" && !validName(input.Title)) || len(input.Model) > 120 {
 		return "", problem("invalid_session", "Enter a working directory on the target machine and a title of at most 120 characters.", 400)
 	}
-	if input.Title == "" {
+	if local {
+		info, err := os.Stat(input.Cwd)
+		if err != nil || !filepath.IsAbs(input.Cwd) || !info.IsDir() {
+			return "", problem("local_directory", "The project directory is unavailable.", 400)
+		}
+	}
+	defaultTitle := input.Title == ""
+	if defaultTitle {
 		input.Title = "New session"
+	}
+	sessionID := model.ID()
+	created := false
+	defer func() {
+		if !created {
+			s.credentialBroker.RevokeSession(sessionID)
+		}
+	}()
+	var tools *provider.ToolServer
+	if local {
+		server := s.credentialBroker.Session(sessionID)
+		tools = &server
 	}
 	s.mu.Lock()
 	current, err := s.readyLocked(input.EndpointID)
@@ -43,21 +128,31 @@ func (s *Service) CreateSession(ctx context.Context, input SessionInput) (string
 	if err != nil {
 		return "", err
 	}
-	params := map[string]any{"cwd": input.Cwd, "approvalPolicy": "on-request", "sandbox": "workspace-write", "ephemeral": false}
-	if input.Model != "" {
-		params["model"] = input.Model
-	}
-	var result codex.ThreadResult
-	if err := current.client.Call(ctx, "thread/start", params, &result); err != nil {
+	result, err := current.client.CreateSession(ctx, provider.SessionOptions{Cwd: input.Cwd, Model: input.Model, Tools: tools, AccessMode: input.AccessMode})
+	if err != nil {
 		return "", err
 	}
-	if result.Thread.ID == "" {
-		return "", errors.New("Codex returned no session identifier")
+	if result.ID == "" {
+		return "", errors.New("The agent returned no session identifier")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	session := &model.Session{ID: model.ID(), EndpointID: input.EndpointID, ProviderID: result.Thread.ID,
-		Title: input.Title, Cwd: input.Cwd, Model: result.Model, State: "idle", CreatedAt: model.Now(), UpdatedAt: model.Now()}
+	if purpose == "requirement" {
+		// A settings update may have arrived while the native session was created.
+		input.AccessMode = s.requirement(input.RequirementID).ConversationAccessMode.Effective()
+	}
+	session := &model.Session{ID: sessionID, BranchID: input.BranchID, Purpose: purpose, EndpointID: input.EndpointID, ProviderID: result.ID,
+		Title: input.Title, DefaultTitle: &defaultTitle, Cwd: input.Cwd, Workspace: binding, Model: result.Model, ModelManaged: modelSelection != nil, AccessMode: input.AccessMode, State: "idle", CreatedAt: model.Now(), UpdatedAt: model.Now()}
+	var values []any
+	if input.RequirementID == "" {
+		project, created := s.ensureProjectLocked(endpoint, input.Cwd)
+		values = append(values, created...)
+		requirement, created := s.defaultRequirementLocked(project)
+		values = append(values, created...)
+		session.RequirementID = requirement.ID
+	} else {
+		session.RequirementID = input.RequirementID
+	}
 	if s.clients[input.EndpointID] != current {
 		session.State = "syncing"
 	}
@@ -65,16 +160,36 @@ func (s *Service) CreateSession(ctx context.Context, input SessionInput) (string
 	if s.clients[input.EndpointID] == current {
 		s.subscribed[session.ID] = current.generation
 	}
-	if err := s.commitLocked("session.updated", session.ID, session); err != nil {
+	if err := s.commitLocked("navigation.updated", session.ID, append(values, session)...); err != nil {
 		return "", err
 	}
+	created = true
 	return session.ID, nil
 }
 
 func (s *Service) Rename(id, title string) error {
-	title = strings.TrimSpace(title)
-	if title == "" || len(title) > 120 {
-		return problem("invalid_title", "Enter a title of at most 120 characters.", 400)
+	return s.UpdateSession(id, SessionUpdate{Title: &title})
+}
+
+type SessionUpdate struct {
+	AccessMode    *provider.AccessMode `json:"accessMode"`
+	Title         *string              `json:"title"`
+	RequirementID *string              `json:"requirementId"`
+}
+
+func (s *Service) UpdateSession(id string, input SessionUpdate) error {
+	if input.AccessMode != nil && !input.AccessMode.Valid() {
+		return invalidAccessMode()
+	}
+	if input.Title != nil {
+		title := strings.TrimSpace(*input.Title)
+		if !validName(title) {
+			return problem("invalid_title", "Enter a title of at most 120 characters.", 400)
+		}
+		input.Title = &title
+	}
+	if input.Title == nil && input.RequirementID == nil && input.AccessMode == nil {
+		return problem("invalid_session_update", "Choose a session title, requirement or access mode to update.", 400)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -82,13 +197,68 @@ func (s *Service) Rename(id, title string) error {
 	if session == nil {
 		return problem("not_found", "Session not found.", 404)
 	}
-	session.Title, session.UpdatedAt = title, model.Now()
-	return s.commitLocked("session.updated", id, session)
+	if input.RequirementID != nil {
+		if session.Purpose == "requirement" && *input.RequirementID != session.RequirementID {
+			return problem("requirement_chat_scope", "A requirement conversation must remain in its owning requirement.", 400)
+		}
+		if *input.RequirementID != session.RequirementID {
+			s.cancelCredentialUsesLocked("", "", session.ID)
+		}
+		requirement, err := s.requirementForEndpointLocked(*input.RequirementID, s.endpoint(session.EndpointID))
+		if err != nil {
+			return err
+		}
+		if requirement.ID != session.RequirementID {
+			if session.Workspace != nil {
+				return problem("workspace_scope", "Worktree sessions must remain in the requirement that owns their branch.", 400)
+			}
+			binding, err := s.requirementWorkspaceLocked(requirement, session.Cwd)
+			if err != nil {
+				return err
+			}
+			session.Workspace = binding
+		}
+		session.RequirementID = *input.RequirementID
+	}
+	if input.Title != nil {
+		session.Title = *input.Title
+		defaultTitle := false
+		session.DefaultTitle = &defaultTitle
+	}
+	session.UpdatedAt = model.Now()
+	kind := "session.updated"
+	values := []any{session}
+	if input.AccessMode != nil {
+		session.AccessMode = *input.AccessMode
+		if session.Purpose == "requirement" {
+			requirement := s.requirement(session.RequirementID)
+			requirement.ConversationAccessMode = *input.AccessMode
+			values = append(values, requirement)
+			kind = "navigation.updated"
+		}
+	}
+	if input.RequirementID != nil {
+		kind = "navigation.updated"
+	}
+	return s.commitLocked(kind, id, values...)
 }
 
 type TurnInput struct {
+	Context         string `json:"-"`
 	ClientRequestID string `json:"clientRequestId"`
 	Text            string `json:"text"`
+}
+
+func (s *Service) submittedTurnLocked(id string, input TurnInput) (*model.Turn, error) {
+	for _, turn := range s.data.Turns {
+		if turn.SessionID == id && turn.ClientRequestID == input.ClientRequestID {
+			if turn.Input != input.Text {
+				return nil, problem("request_conflict", "This request ID already belongs to a different task.", 409)
+			}
+			return turn, nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *Service) Submit(id string, input TurnInput) (string, error) {
@@ -101,12 +271,14 @@ func (s *Service) Submit(id string, input TurnInput) (string, error) {
 	if session == nil {
 		return "", problem("not_found", "Session not found.", 404)
 	}
-	for _, turn := range s.data.Turns {
-		if turn.SessionID == id && turn.ClientRequestID == input.ClientRequestID {
-			if turn.Input != input.Text {
-				return "", problem("request_conflict", "This request ID already belongs to a different task.", 409)
-			}
-			return turn.ID, nil
+	if turn, err := s.submittedTurnLocked(id, input); err != nil {
+		return "", err
+	} else if turn != nil {
+		return turn.ID, nil
+	}
+	if session.Purpose == "requirement" {
+		if w := s.workflow(session.RequirementID); w != nil && (w.State == "pending" || w.State == "running") && input.ClientRequestID != w.RequestID {
+			return "", problem("workflow_busy", "The preparation workflow owns this conversation. Pause it before sending a separate message.", 409)
 		}
 	}
 	current, err := s.readyLocked(session.EndpointID)
@@ -116,7 +288,46 @@ func (s *Service) Submit(id string, input TurnInput) (string, error) {
 	if session.ActiveTurn != "" || session.State != "idle" {
 		return "", problem("session_busy", "Wait for the active task or synchronize the session before sending another task.", 409)
 	}
-	turn := &model.Turn{ID: model.ID(), SessionID: id, ClientRequestID: input.ClientRequestID, Input: input.Text, State: "pending", CreatedAt: model.Now()}
+	binding, err := s.sessionWorkspaceLocked(session)
+	if err != nil {
+		return "", err
+	}
+	if binding != nil {
+		requirementID := session.RequirementID
+		s.mu.Unlock()
+		verification := workspace.Verify(s.ctx, *binding)
+		s.mu.Lock()
+		if turn, err := s.submittedTurnLocked(id, input); err != nil {
+			return "", err
+		} else if turn != nil {
+			return turn.ID, nil
+		}
+		if verification != nil {
+			return "", problem("workspace_unavailable", verification.Error(), 409)
+		}
+		if session.RequirementID != requirementID {
+			return "", problem("workspace_scope", "Sessions must use their requirement's worktree directory.", 409)
+		}
+		current, err = s.readyLocked(session.EndpointID)
+		if err != nil {
+			return "", err
+		}
+		if session.ActiveTurn != "" || session.State != "idle" {
+			return "", problem("session_busy", "Wait for the active task or synchronize the session before sending another task.", 409)
+		}
+	}
+	if err := s.writerAvailableLocked(session); err != nil {
+		return "", err
+	}
+	selection := s.scopeModelLocked(s.requirement(session.RequirementID), s.endpoint(session.EndpointID).Provider)
+	if selection == nil && session.ModelManaged {
+		value := ""
+		selection = &value
+	}
+	if selection != nil {
+		session.Model, session.ModelManaged = *selection, true
+	}
+	turn := &model.Turn{Model: selection, ID: model.ID(), SessionID: id, ClientRequestID: input.ClientRequestID, Context: input.Context, Input: input.Text, AccessMode: session.AccessMode.Effective(), State: "pending", CreatedAt: model.Now()}
 	turn.BaselineKnown = true
 	for _, previous := range s.data.Turns {
 		if previous.SessionID == id && previous.ProviderID != "" {
@@ -130,15 +341,13 @@ func (s *Service) Submit(id string, input TurnInput) (string, error) {
 	if err := s.commitLocked("session.updated", id, session, turn, entry); err != nil {
 		return "", err
 	}
-	threadID, turnID := session.ProviderID, turn.ID
+	threadID, turnID, prompt := session.ProviderID, turn.ID, turn.Prompt()
+	tools := s.credentialToolsLocked(session)
+	accessMode, selectedModel, cwd := turn.AccessMode, turn.Model, session.Cwd
 	s.workers.Add(1)
 	go func() {
 		defer s.workers.Done()
-		var result struct {
-			Turn codex.NativeTurn `json:"turn"`
-		}
-		err := current.client.Call(s.ctx, "turn/start", map[string]any{"threadId": threadID,
-			"input": []map[string]any{{"type": "text", "text": input.Text, "text_elements": []any{}}}}, &result)
+		result, err := current.client.StartTurn(s.ctx, threadID, provider.TurnOptions{Text: prompt, Tools: tools, AccessMode: accessMode, Model: selectedModel, Cwd: cwd})
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		turn := s.turn(turnID)
@@ -146,19 +355,19 @@ func (s *Service) Submit(id string, input TurnInput) (string, error) {
 		if terminal(turn.State) {
 			return
 		}
-		if err != nil || result.Turn.ID == "" {
+		if err != nil || result.ID == "" {
 			turn.State, session.State = "unknown", "syncing"
 			turn.Error = "Task acknowledgement was lost. Synchronize the session; this task will not be resubmitted automatically."
-			var rpcError *codex.RPCError
+			var rpcError *provider.Rejection
 			if errors.As(err, &rpcError) {
 				turn.State, session.State, session.ActiveTurn, turn.Error = "failed", "idle", "", rpcError.Message
 			}
 			session.Error = turn.Error
 		} else if s.clients[session.EndpointID] == current {
-			if turn.ProviderID != "" && turn.ProviderID != result.Turn.ID {
+			if turn.ProviderID != "" && turn.ProviderID != result.ID {
 				turn.State, session.State, turn.Error = "unknown", "syncing", "The agent returned a conflicting task identifier."
 			} else {
-				turn.ProviderID = result.Turn.ID
+				turn.ProviderID = result.ID
 				if turn.State == "pending" {
 					turn.State = "running"
 				}
@@ -196,7 +405,7 @@ func (s *Service) Interrupt(ctx context.Context, id string) error {
 	}
 	threadID, providerID := session.ProviderID, turn.ProviderID
 	s.mu.Unlock()
-	return current.client.Call(ctx, "turn/interrupt", map[string]any{"threadId": threadID, "turnId": providerID}, nil)
+	return current.client.Interrupt(ctx, threadID, providerID)
 }
 
 func (s *Service) Restore(ctx context.Context, id string) error {
@@ -217,7 +426,13 @@ func (s *Service) Restore(ctx context.Context, id string) error {
 	}
 	s.restoring[id] = true
 	defer func() { s.mu.Lock(); delete(s.restoring, id); s.mu.Unlock() }()
-	threadID, cwd := session.ProviderID, session.Cwd
+	threadID, cwd, purpose, sessionModel := session.ProviderID, session.Cwd, session.Purpose, session.Model
+	accessMode := session.AccessMode.Effective()
+	var activeModel *string
+	if active := s.turn(session.ActiveTurn); active != nil {
+		accessMode, activeModel = active.AccessMode.Effective(), active.Model
+	}
+	tools := s.credentialToolsLocked(session)
 	subscribed := s.subscribed[id] == current.generation
 	empty := true
 	for _, turn := range s.data.Turns {
@@ -232,42 +447,43 @@ func (s *Service) Restore(ctx context.Context, id string) error {
 		return err
 	}
 	s.mu.Unlock()
-	var result codex.ThreadResult
-	if subscribed {
-		err = current.client.Call(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": !empty}, &result)
-	} else {
-		err = current.client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "cwd": cwd,
-			"approvalPolicy": "on-request", "sandbox": "workspace-write"}, &result)
+	result, err := current.client.SynchronizeSession(ctx, provider.SessionReference{ID: threadID, Cwd: cwd, Subscribed: subscribed, Empty: empty, Tools: tools, AccessMode: accessMode, Model: activeModel})
+	if empty && purpose == "requirement" && errors.Is(err, provider.ErrEmptySession) {
+		result, err = current.client.CreateSession(ctx, provider.SessionOptions{Cwd: cwd, Model: sessionModel, Tools: tools, AccessMode: accessMode})
+		if err == nil && result.ID != "" {
+			threadID = result.ID
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.clients[session.EndpointID] != current {
 		return problem("agent_offline", "The connection changed while synchronizing this session.", 409)
 	}
-	if err != nil || result.Thread.ID != threadID {
+	if err != nil || result.ID != threadID {
 		session.State, session.Error = "syncing", "Session synchronization failed. Check the service and try again."
-		if err != nil && strings.Contains(err.Error(), "no rollout found") && empty {
-			session.Error = "Codex cannot restore an empty session after its connection closes. Create a new session."
+		if errors.Is(err, provider.ErrEmptySession) {
+			session.Error = err.Error()
 		}
 		s.commitLocked("session.updated", id, session)
 		if err != nil {
 			return err
 		}
-		return errors.New("Codex returned a mismatched session identifier")
+		return errors.New("The agent returned a mismatched session identifier")
 	}
 	s.subscribed[id] = current.generation
+	session.ProviderID = threadID
 	values := []any{session}
-	if intent := s.reconcileIntentLocked(session, result.Thread.Turns); intent != nil {
+	if intent := s.reconcileIntentLocked(session, result.Turns); intent != nil {
 		values = append(values, intent)
 	}
-	for _, nativeTurn := range result.Thread.Turns {
+	for _, nativeTurn := range result.Turns {
 		turn := s.nativeTurnLocked(session, nativeTurn.ID, false)
 		if !terminal(turn.State) {
 			s.applyTurnLocked(session, turn, nativeTurn)
 		}
 		values = append(values, turn)
 		for _, raw := range nativeTurn.Items {
-			if entry := s.itemLocked(session, turn, raw, terminal(nativeTurn.Status)); entry != nil {
+			if entry := s.itemLocked(session, turn, raw, terminal(nativeTurn.State)); entry != nil {
 				values = append(values, entry)
 			}
 		}

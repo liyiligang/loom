@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { Radio, Cable, ArrowUp, Square, Menu, ChevronRight, Pencil, RefreshCw, Folder, FolderPlus, MessageSquare, Search, GitBranch, KeyRound, ArrowLeft, Settings } from '@lucide/vue'
+import { Radio, Cable, ArrowUp, Square, Menu, ChevronRight, Pencil, RefreshCw, Folder, FolderPlus, MessageSquare, Search, GitBranch, KeyRound, ArrowLeft, Settings, PanelLeftClose, PanelLeftOpen, X } from '@lucide/vue'
 import { request } from '../api'
 import { useWorkspace } from '../composables/useWorkspace'
 import { showLocalSetup } from '../composables/localSetup'
 import { shouldSendTask } from '../composables/composerKeyboard'
+import { clampNavigationWidth, navigationLayoutKey, navigationWidth, readNavigationLayout } from '../composables/navigationLayout'
 import EntryCard from '../components/EntryCard.vue'
 import LanguagePicker from '../components/LanguagePicker.vue'
 import ThemePicker from '../components/ThemePicker.vue'
@@ -126,6 +127,37 @@ watch(connectionsOpen, open => { if (!open) endpointForm.token = '' })
 const pageTitle = computed(() => page.value === 'settings' ? t('settings.title') : page.value === 'connections' ? t('connection.connections') : page.value === 'group' ? groupPageTitle.value : page.value === 'newSession' ? t('session.new') : page.value === 'project' ? skillsProject.value?.name ?? t('skills.title') : page.value === 'requirement' ? (viewedRequirement.value ? requirementName(viewedRequirement.value) : t('navigation.requirement')) : page.value === 'skill' ? skillContext.value?.skill.name ?? t('skills.title') : t('secrets.title'))
 const remoteFormOpen = ref(false)
 const sidebarOpen = ref(false)
+function layoutStorage() { try { return localStorage } catch { return undefined } }
+const navigationLayout = ref(readNavigationLayout(layoutStorage()))
+const navigationQuery = ref('')
+const desktopNavigation = ref(window.matchMedia('(min-width: 761px)').matches)
+const navigationHidden = computed(() => desktopNavigation.value ? navigationLayout.value.collapsed : !sidebarOpen.value)
+const resize = ref<{ pointer: number; x: number; width: number }>()
+function setNavigationWidth(width: number) { navigationLayout.value = { ...navigationLayout.value, width: clampNavigationWidth(width) } }
+function startNavigationResize(event: PointerEvent) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  resize.value = { pointer: event.pointerId, x: event.clientX, width: navigationLayout.value.width }
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+}
+function resizeNavigation(event: PointerEvent) {
+  if (resize.value?.pointer === event.pointerId) setNavigationWidth(resize.value.width + event.clientX - resize.value.x)
+}
+function stopNavigationResize(event: PointerEvent) {
+  if (resize.value?.pointer !== event.pointerId) return
+  resize.value = undefined
+  const target = event.currentTarget as HTMLElement
+  if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId)
+}
+function resizeNavigationWithKeyboard(event: KeyboardEvent) {
+  const width = event.key === 'Home' ? navigationWidth.min : event.key === 'End' ? navigationWidth.max : event.key === 'ArrowLeft' ? navigationLayout.value.width - 16 : event.key === 'ArrowRight' ? navigationLayout.value.width + 16 : undefined
+  if (width !== undefined) { event.preventDefault(); setNavigationWidth(width) }
+}
+watch(navigationLayout, value => { try { layoutStorage()?.setItem(navigationLayoutKey, JSON.stringify(value)) } catch { /* Resizing works without persistence. */ } }, { flush: 'sync' })
+const navigationMedia = window.matchMedia('(min-width: 761px)')
+function updateNavigationMedia() { desktopNavigation.value = navigationMedia.matches }
+onMounted(() => navigationMedia.addEventListener('change', updateNavigationMedia))
+onBeforeUnmount(() => navigationMedia.removeEventListener('change', updateNavigationMedia))
 const busy = ref(false)
 const sending = ref(false)
 const permissionBusy = ref(false)
@@ -347,13 +379,14 @@ watch(() => groupForm.endpointId, () => {
 </script>
 
 <template>
-  <div class="workspace">
+  <div class="workspace" :class="{ 'navigation-collapsed': navigationLayout.collapsed, 'navigation-resizing': Boolean(resize) }" :style="{ '--navigation-width': `${navigationLayout.width}px` }">
     <Transition name="fade"><button v-if="sidebarOpen" class="sidebar-backdrop" :aria-label="t('session.closeNavigation')" @click="sidebarOpen = false"></button></Transition>
-    <aside class="sidebar" :class="{ open: sidebarOpen }" :aria-label="t('session.navigation')">
+    <aside id="loom-navigation" class="sidebar" :class="{ open: sidebarOpen }" :inert="navigationHidden" :aria-label="t('session.navigation')">
       <RouterLink to="/" class="brand" @click="sidebarOpen = false; page = 'conversation'"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 4v24M16 4v24M25 4v24M4 9h24M4 16h24M4 23h24" /><path class="weave" d="M7 9h9v7h9v7" /></svg><span>Loom</span></RouterLink>
       <button class="sidebar-add" @click="newProject"><FolderPlus :size="17" /><span>{{ t('navigation.newProject') }}</span></button>
+      <div class="navigation-search"><Search :size="15" aria-hidden="true" /><input v-model="navigationQuery" type="search" :aria-label="t('navigation.search')" :placeholder="t('navigation.search')" @keydown.esc="navigationQuery = ''" /><button v-if="navigationQuery" class="icon-button" :aria-label="t('navigation.clearSearch')" @click="navigationQuery = ''"><X :size="14" /></button></div>
       <div class="rail-heading">{{ t('navigation.projects') }}<span>{{ number(snapshot.projects.length) }}</span></div>
-      <ProjectTree :projects="snapshot.projects" :requirements="snapshot.requirements" :sessions="snapshot.sessions" :endpoints="snapshot.endpoints" :selected-id="page === 'conversation' ? selectedId : ''" :active-project-id="navigationProjectId" :active-requirement-id="navigationRequirementId" :busy="busy" :rename="renameNavigation" @new-requirement="newRequirement" @new-session="newSession" @view-project="openProject" @view-requirement="openRequirement" @navigate="sidebarOpen = false; page = 'conversation'" />
+      <ProjectTree :query="navigationQuery" :projects="snapshot.projects" :requirements="snapshot.requirements" :sessions="snapshot.sessions" :endpoints="snapshot.endpoints" :selected-id="page === 'conversation' ? selectedId : ''" :active-project-id="navigationProjectId" :active-requirement-id="navigationRequirementId" :busy="busy" :rename="renameNavigation" @new-requirement="newRequirement" @new-session="newSession" @view-project="openProject" @view-requirement="openRequirement" @navigate="sidebarOpen = false; page = 'conversation'" />
       <div class="rail-bottom">
         <div class="rail-heading">{{ t('connection.services') }}</div>
         <button v-for="value in snapshot.endpoints" :key="value.id" class="rail-agent" @click="openConnections(); if (!value.local) editEndpoint(value)"><span class="rail-agent-icon" aria-hidden="true"><Radio :size="14" /></span><span class="rail-agent-details"><strong>{{ localName(value) }}</strong><small><i class="state-dot" :class="value.state" aria-hidden="true"></i>{{ label(value.state) }}</small></span></button>
@@ -366,11 +399,13 @@ watch(() => groupForm.endpointId, () => {
         <LanguagePicker />
         <ThemePicker />
       </div>
+      <div class="navigation-resize" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="loom-navigation" :aria-label="t('navigation.resize')" :aria-valuemin="navigationWidth.min" :aria-valuemax="navigationWidth.max" :aria-valuenow="navigationLayout.width" @pointerdown="startNavigationResize" @pointermove="resizeNavigation" @pointerup="stopNavigationResize" @pointercancel="stopNavigationResize" @lostpointercapture="resize = undefined" @keydown="resizeNavigationWithKeyboard" @dblclick="setNavigationWidth(navigationWidth.default)"></div>
     </aside>
 
     <main class="main-workspace">
       <header class="workspace-header">
         <button class="icon-button mobile-menu" :aria-label="t('session.openNavigation')" @click="sidebarOpen = true"><Menu :size="21" /></button>
+        <button class="icon-button desktop-navigation-toggle" :aria-label="t(navigationLayout.collapsed ? 'navigation.expand' : 'navigation.collapse')" :title="t(navigationLayout.collapsed ? 'navigation.expand' : 'navigation.collapse')" :aria-expanded="!navigationLayout.collapsed" aria-controls="loom-navigation" @click="navigationLayout = { ...navigationLayout, collapsed: !navigationLayout.collapsed }"><component :is="navigationLayout.collapsed ? PanelLeftOpen : PanelLeftClose" :size="19" /></button>
         <div v-if="!localSetupOpen" class="workspace-title"><h1 v-if="page !== 'conversation'">{{ pageTitle }}</h1><strong v-else>{{ detail ? sessionTitle(detail.session) : t('navigation.projects') }}</strong></div>
         <SessionPermissions v-if="page === 'conversation' && detail && !localSetupOpen" :key="detail.session.id" :value="detail.session.accessMode" :active="Boolean(activeTurn)" :active-mode="activeTurn?.accessMode" :disabled="!online || busy || sending" :save="savePermissions" @busy="permissionBusy = $event" />
       </header>

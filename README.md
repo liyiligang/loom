@@ -6,7 +6,7 @@ Starting Loom starts its web server and detects installed Codex and Claude Code 
 
 The development build provides local Codex over stdio, a local Claude Agent SDK bridge, remote Codex over WebSocket, a bilingual Vue workspace, and SQLite history. Remote Loom nodes and mDNS remain planned.
 
-Requirement documents, decisions, test cases, datasets, Loop Design, and design documents are stored as files beneath `docs/requirements/<requirement ID>/` in the requirement's selected document-source worktree or project directory. Their tabs support adding, viewing, editing, downloading, and linking files. Documents use Markdown, test cases use YAML/JSON, and datasets use CSV/JSONL/JSON or externally added Parquet. SQLite stores file metadata and relationships, while the files retain their bodies and can be versioned with Git. Requirement AI messages receive the current branch's file catalog and read relevant files through native tools. Back up both project/worktree files and the Loom data directory.
+Requirement documents, decisions, prototypes, test cases, datasets, Loop Design, and design documents are stored as files beneath `docs/requirements/<requirement ID>/` in the requirement's selected document-source worktree or project directory. Ask AI to create materials; their tabs support viewing, editing, downloading, and linking saved files. Documents use Markdown, test cases use YAML/JSON, and datasets use CSV/JSONL/JSON or externally added Parquet. SQLite stores file metadata and relationships, while the files retain their bodies and can be versioned with Git. Requirement AI messages receive the selected material source's file catalog and read relevant files through native tools. Back up both project/worktree files and the Loom data directory.
 
 ## Build and run
 
@@ -38,6 +38,12 @@ npm --prefix web run dev
 ```
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173) for Vite hot reload. Vite proxies `/api` to the controller on port 7331. Restart Go after backend changes.
+
+## Development checks and skills
+
+Run `./scripts/check.ps1` on Windows or `sh scripts/check.sh` on macOS/Linux. The command checks skill definitions and mirror consistency, runs tooling/frontend/bridge tests, builds embedded assets, and runs Go formatting, vet, and tests. Missing or stale direct dependencies are installed automatically; use `-InstallDependencies` or `--install` to force a clean install after other lockfile changes. GitHub Actions runs these same checks on Windows and Linux.
+
+Edit project skills in `.agents/skills/`, then run `node scripts/skills.mjs sync`. `.claude/skills/` is the generated mirror, including supporting references, scripts, and assets. Sync detects independent mirror changes before writing. `node scripts/skills.mjs check` validates metadata, invocation settings, reference links, and drift. Shared task sizing, tracker defaults, Loom ownership, and validation guidance live in [docs/agents/workflow.md](docs/agents/workflow.md); both harnesses reach them through `AGENTS.md`.
 
 ## Local setup
 
@@ -128,12 +134,13 @@ The first release focuses on a useful UI for everyday agent operations. Automate
 
 ## Workflow
 
-1. Prepare a signed-in Codex or Claude Code installation locally, or a running authenticated Codex app-server on a remote target.
-2. Start Loom. The planned default web address is `127.0.0.1:7331`, and the terminal prints the browser URL.
-3. Open `http://127.0.0.1:7331`. The page automatically starts LAN discovery and displays the results.
-4. Configure credentials when connecting to a service for the first time. Previously configured services can reconnect automatically. Manual address entry is also available.
-5. Add a project and requirement, then send a message in the requirement's AI conversation to align its documents and design. Its conversation is created automatically. Use the requirement's + button to create a feature session with an optional title and compatible agent; it inherits the requirement worktree or project directory. Existing feature sessions remain available in the sidebar.
-6. Watch live output, respond to approvals or questions, and continue the conversation after the task finishes.
+1. Prepare a signed-in local Codex or Claude Code installation, or an authenticated remote Codex app-server.
+2. Start Loom and open the printed browser URL, normally `http://127.0.0.1:7331`.
+3. Confirm detected local agents once, or explicitly add a remote service with its address and optional token. Saved services reconnect; **Discover again** starts bounded LAN probing when requested.
+4. Add a project and requirement. For an understood change, use its conversation or a feature session directly. For document preparation, enter a brief and click **Start requirement preparation**.
+5. Preparation writes requirement/design drafts, records Grill questions, and aligns documents using the submitted answers. Review and confirm the actual files to generate a Loop preview. This confirmation does not start development.
+6. Bind a branch group and prepare members when execution needs isolated workspaces. A new feature session selects a ready member; its working directory stays fixed while the shared material source remains independently selected.
+7. Send an implementation task, watch live output, answer approvals or questions, and review changes and checks. Automatic development Loop execution and integration remain planned.
 
 Local agents and direct remote Codex are implemented. Remote Claude and node management remain planned, and real task-level validation is still required.
 

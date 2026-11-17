@@ -22,7 +22,7 @@ The map is a single issue on this repo's issue tracker, labelled `wayfinder:map`
 
 The map is an **index**, not a store. It lists the decisions made and points at the tickets that hold their detail; a decision lives in exactly one place, its ticket, so the map never restates it, only gists it and links.
 
-**Where the map, its child tickets, blocking, and frontier queries physically live is tracker-specific.** The issue tracker should have been provided to you. If not, tell the user to run `/setup-matt-pocock-skills`. Consult the tracker doc's "Wayfinding operations" section for how _this_ repo expresses them. If no tracker has been provided, default to the local-markdown tracker.
+**Where the map and its decision tickets live is tracker-specific.** Read the [project tracker](../../../docs/agents/issue-tracker.md) and [workflow](../../../docs/agents/workflow.md). Use local Markdown when no external tracker was selected. Reuse Loom's existing material source and preserve its stage protocol and fixed workspace; decision-ticket resolution does not advance a preparation ledger or start development.
 
 ### The map body
 

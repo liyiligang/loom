@@ -4,6 +4,7 @@ import { Check, Cpu, Plus, RefreshCw, Trash2 } from '@lucide/vue'
 import { request } from '../api'
 import { useI18n } from '../i18n'
 import type { ConfiguredModel, ModelCatalog } from '../types'
+import { modelCatalogErrors } from '../composables/modelCatalogValidation'
 
 const props = defineProps<{ catalog?: ModelCatalog; disabled?: boolean; refresh: () => Promise<void> }>()
 const { t, errorMessage } = useI18n()
@@ -23,15 +24,8 @@ watch(() => JSON.stringify(props.catalog), () => { if (!dirty.value && !saving.v
 function edit() { dirty.value = true; saved.value = false; error.value = undefined }
 function add() { rows.value.push({ key: crypto.randomUUID(), provider: 'codex', name: '', id: '' }); edit() }
 function remove(key: string) { rows.value = rows.value.filter(value => value.key !== key); edit() }
-const valid = computed(() => {
-  const keys = new Set<string>()
-  return rows.value.length <= 200 && rows.value.every(value => {
-    const key = `${value.provider}:${value.id.trim()}`
-    if (keys.has(key)) return false
-    keys.add(key)
-    return Boolean(value.name.trim()) && Boolean(value.id.trim()) && new TextEncoder().encode(value.id.trim()).length <= 120 && !/[\s\u0000-\u001f\u007f]/u.test(value.id.trim())
-  })
-})
+const rowErrors = computed(() => modelCatalogErrors(rows.value))
+const valid = computed(() => rows.value.length <= 200 && rowErrors.value.every(value => !value.name && !value.id))
 async function reload() {
   try { await props.refresh(); reset() } catch (cause) { error.value = cause }
 }
@@ -58,11 +52,10 @@ async function save() {
         <legend>{{ t('modelCatalog.item', { index: index + 1 }) }}</legend>
         <div class="model-catalog-row-heading"><label :for="`${id}-${row.key}-provider`">{{ t('modelCatalog.agent') }}</label><button type="button" class="icon-button" :aria-label="t('modelCatalog.remove', { model: row.name || t('modelCatalog.unnamed') })" @click="remove(row.key)"><Trash2 :size="15" /></button></div>
         <select :id="`${id}-${row.key}-provider`" v-model="row.provider" class="text-field"><option value="codex">{{ t('agents.codex') }}</option><option value="claude">{{ t('agents.claude') }}</option></select>
-        <div class="model-catalog-fields"><div><label :for="`${id}-${row.key}-name`">{{ t('modelCatalog.name') }}</label><input :id="`${id}-${row.key}-name`" v-model="row.name" class="text-field" maxlength="120" :placeholder="t('modelCatalog.namePlaceholder')" /></div><div><label :for="`${id}-${row.key}-id`">{{ t('models.identifier') }}</label><input :id="`${id}-${row.key}-id`" v-model="row.id" class="text-field mono" maxlength="120" autocomplete="off" spellcheck="false" :placeholder="t('models.identifierPlaceholder')" /></div></div>
+        <div class="model-catalog-fields"><div><label :for="`${id}-${row.key}-name`">{{ t('modelCatalog.name') }}</label><input :id="`${id}-${row.key}-name`" v-model="row.name" class="text-field" :aria-invalid="Boolean(rowErrors[index]?.name)" :aria-describedby="rowErrors[index]?.name ? `${id}-${row.key}-name-error` : undefined" :placeholder="t('modelCatalog.namePlaceholder')" /><p v-if="rowErrors[index]?.name" :id="`${id}-${row.key}-name-error`" class="model-field-error">{{ t(rowErrors[index]!.name!) }}</p></div><div><label :for="`${id}-${row.key}-id`">{{ t('models.identifier') }}</label><input :id="`${id}-${row.key}-id`" v-model="row.id" class="text-field mono" autocomplete="off" spellcheck="false" :aria-invalid="Boolean(rowErrors[index]?.id)" :aria-describedby="rowErrors[index]?.id ? `${id}-${row.key}-id-error` : undefined" :placeholder="t('models.identifierPlaceholder')" /><p v-if="rowErrors[index]?.id" :id="`${id}-${row.key}-id-error`" class="model-field-error">{{ t(rowErrors[index]!.id!) }}</p></div></div>
       </fieldset>
       <button type="button" class="button" :disabled="disabled || saving || rows.length >= 200" @click="add"><Plus :size="15" />{{ t('modelCatalog.add') }}</button>
       <p class="model-catalog-note">{{ t('modelCatalog.identifierHint') }}</p>
-      <p v-if="rows.length && !valid" class="model-catalog-note">{{ t('modelCatalog.validation') }}</p>
       <div class="model-catalog-actions"><button type="submit" class="button primary" :disabled="disabled || saving || !valid || !dirty">{{ t(saving ? 'models.saving' : 'navigation.save') }}</button><span v-if="saved" role="status"><Check :size="14" />{{ t('models.saved') }}</span></div>
       <p v-if="error" class="form-error" role="alert">{{ errorMessage(error, 'errors.modelUpdate') }}</p>
     </form>
@@ -84,5 +77,8 @@ async function save() {
 .model-catalog-actions, .model-catalog-actions span { display: flex; align-items: center; gap: 8px; }
 .model-catalog-actions span { color: var(--muted); font-size: 12px; }
 .model-catalog-note { margin: 0; }
+.model-catalog-fields > div { min-width: 0; }
+.model-catalog-fields .text-field[aria-invalid='true'] { border-color: var(--error); }
+.model-field-error { margin: 7px 0 0; color: var(--error); font-size: 12px; line-height: 1.6; }
 @media (max-width: 620px) { .model-catalog-fields { grid-template-columns: 1fr; } }
 </style>

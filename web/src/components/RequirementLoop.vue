@@ -64,13 +64,16 @@ watch([progressView, () => progress.value.current], ([isProgress, id], previous)
 watch(zoom, () => { if (progressView.value && follow.value) void nextTick(() => centerCurrent(false)) })
 function visibilityChanged() { pageVisible.value = !document.hidden }
 let observer: IntersectionObserver | undefined
+let canvasObserver: ResizeObserver | undefined
 onMounted(() => {
   observer = new IntersectionObserver(entries => { inView.value = entries.some(entry => entry.isIntersecting) })
   if (root.value) observer.observe(root.value)
+  canvasObserver = new ResizeObserver(() => { if (progressView.value && follow.value) centerCurrent(false) })
+  if (canvas.value) canvasObserver.observe(canvas.value)
   document.addEventListener('visibilitychange', visibilityChanged)
   if (follow.value) centerCurrent(false)
 })
-onBeforeUnmount(() => { observer?.disconnect(); document.removeEventListener('visibilitychange', visibilityChanged) })
+onBeforeUnmount(() => { observer?.disconnect(); canvasObserver?.disconnect(); document.removeEventListener('visibilitychange', visibilityChanged) })
 </script>
 
 <template>
@@ -116,11 +119,10 @@ onBeforeUnmount(() => { observer?.disconnect(); document.removeEventListener('vi
 </template>
 
 <style scoped>
-@property --loom-loop-reflection-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
-.real-loop { padding: 22px; border: 1px solid var(--border); border-radius: 16px; margin-bottom: 24px; background: var(--surface-subtle); --loop-active: #626d7a; --loop-metal: #a5afbc; --loop-metal-soft: #e8edf3; --loop-done: #5a9e87; --loop-wait: #d6a456; --loop-error: #d77171; }
+.real-loop { padding: 18px; border: 1px solid var(--border); border-radius: 12px; margin-bottom: 24px; background: var(--surface-subtle); --loop-active: #626d7a; --loop-metal: #a5afbc; --loop-metal-soft: #e8edf3; --loop-done: var(--success); --loop-wait: var(--warning); --loop-error: var(--error); }
 :global(:root[data-theme='dark'] .real-loop) { --loop-active: #c1c9d3; --loop-metal: #c1c9d3; --loop-metal-soft: #e8edf3; }
 .real-loop > header { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
-.loop-eyebrow { display: flex; align-items: center; gap: 7px; font-size: 10px; letter-spacing: .1em; color: var(--muted); }
+.loop-eyebrow { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
 .real-loop h2 { margin: 10px 0 8px; font-size: 22px; font-weight: 600; }
 .real-loop header p { max-width: 600px; margin: 0; font-size: 12px; line-height: 1.7; color: var(--muted); }
 .loop-live { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 16px; margin-bottom: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
@@ -133,18 +135,18 @@ onBeforeUnmount(() => { observer?.disconnect(); document.removeEventListener('vi
 .loop-live.ready .loop-live-mark { background: var(--loop-done); }
 .loop-live.waiting .loop-live-mark, .loop-live.answers .loop-live-mark, .loop-live.approval .loop-live-mark, .loop-live.confirmation .loop-live-mark { background: var(--loop-wait); }
 .loop-live.failed .loop-live-mark { background: var(--loop-error); }
-.loop-completion { width: 140px; flex-shrink: 0; color: var(--muted); font-size: 10px; }
+.loop-completion { width: 160px; flex-shrink: 0; color: var(--muted); font-size: 12px; }
 .loop-progress-track { height: 4px; border-radius: 4px; background: var(--border); margin-top: 9px; overflow: hidden; }
 .loop-progress-track i { display: block; height: 100%; background: var(--loop-done); transition: width .35s ease; }
 .loop-view-switch { display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: 9px; }
-.loop-view-switch button { background: transparent; border: 0; border-radius: 6px; font: inherit; font-size: 11px; padding: 7px 10px; color: var(--muted); }
+.loop-view-switch button { background: transparent; border: 0; border-radius: 6px; font: inherit; font-size: 12px; padding: 7px 10px; color: var(--muted); }
 .loop-view-switch button[aria-pressed='true'] { background: var(--surface-raised); color: var(--text); box-shadow: 0 1px 5px #00000012; }
 .loop-body { display: grid; grid-template-columns: minmax(0, 1fr) 260px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
 .loop-canvas-wrap { min-width: 0; }
-.loop-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+.loop-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); }
 .loop-toolbar > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .loop-toolbar label { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
-.loop-locate { padding: 5px 8px; font-size: 10px; }
+.loop-locate { padding: 6px 8px; font-size: 12px; }
 .loop-canvas { height: 360px; overflow: auto; background-image: radial-gradient(var(--border-strong) 1px, transparent 1px); background-size: 20px 20px; }
 .loop-world { position: relative; transform-origin: 0 0; }
 .loop-world svg { position: absolute; top: 0; left: 0; overflow: visible; }
@@ -163,33 +165,27 @@ onBeforeUnmount(() => { observer?.disconnect(); document.removeEventListener('vi
 .loop-reflection.bloom { stroke-width: 9; opacity: .45; filter: blur(3px); }
 .loop-node { position: absolute; display: flex; flex-direction: column; width: 224px; height: 142px; text-align: left; border: 1px solid var(--border-strong); border-radius: 12px; padding: 14px; background: var(--surface-raised); box-shadow: 0 5px 16px #00000008; color: var(--text); cursor: pointer; transition: border-color .25s, box-shadow .25s; }
 .loop-node.pending { color: var(--muted); }
-.loop-node.selected { outline: 2px solid color-mix(in srgb, var(--text) 18%, transparent); outline-offset: 3px; }
-.loop-node.is-current { border-color: var(--loop-active); box-shadow: 0 0 0 3px color-mix(in srgb, var(--loop-metal) 8%, transparent), 0 4px 24px color-mix(in srgb, var(--loop-metal) 12%, transparent); z-index: 2; }
-.loop-node.is-current::after { content: ''; position: absolute; inset: -5px; border: 1px solid var(--loop-active); border-radius: 16px; opacity: .3; pointer-events: none; }
-.loop-node.is-current.running { background: linear-gradient(135deg, color-mix(in srgb, var(--loop-metal) 10%, transparent), transparent 60%), var(--surface-raised); box-shadow: 0 0 0 3px color-mix(in srgb, var(--loop-metal) 7%, transparent), 0 6px 30px color-mix(in srgb, var(--loop-metal) 12%, transparent), inset 0 1px 0 color-mix(in srgb, var(--loop-metal-soft) 25%, transparent); }
-.loop-effects .loop-node.is-current.running::after { inset: -1px; border: 0; border-radius: 12px; padding: 1.5px; opacity: 1; background: conic-gradient(from var(--loom-loop-reflection-angle), transparent 0deg, #8d98a855 65deg, #c5ceda 90deg, #fbfdff 110deg, #b8c4d3 130deg, transparent 170deg, transparent 360deg); mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0); mask-composite: exclude; -webkit-mask-composite: xor; animation: loop-metallic-reflection 4.8s linear infinite; }
-.loop-node.is-current.waiting { border-color: var(--loop-wait); box-shadow: 0 0 0 3px #d6a45615, 0 0 24px #d6a45618; }
-.loop-node.is-current.waiting::after { border-color: var(--loop-wait); }
-.loop-effects .loop-node.is-current.waiting::after { animation: loop-wait 3s ease-in-out infinite; }
-.loop-node.is-current.failed { border-color: var(--loop-error); box-shadow: 0 0 0 3px #d7717118; }
-.loop-node.is-current.failed::after { border-color: var(--loop-error); }
-.loop-node.is-current.paused, .loop-node.is-current.unknown { border-color: #899ab0; box-shadow: 0 0 0 3px #899ab01a; }
-.loop-node.is-current.paused::after, .loop-node.is-current.unknown::after { border-color: #899ab0; }
+.loop-node.selected { outline: 2px dashed color-mix(in srgb, var(--text) 55%, transparent); outline-offset: 4px; }
+.loop-node:focus-visible { outline: 3px solid var(--focus); outline-offset: 5px; }
+.loop-node.is-current { border: 2px solid var(--loop-active); box-shadow: 0 0 0 2px color-mix(in srgb, var(--loop-metal) 10%, transparent); z-index: 2; }
+.loop-node.is-current.waiting { border-color: var(--loop-wait); }
+.loop-node.is-current.failed { border-color: var(--loop-error); }
+.loop-node.is-current.paused, .loop-node.is-current.unknown { border-color: var(--muted); }
 .loop-node.completed { border-color: color-mix(in srgb, var(--loop-done) 65%, var(--border)); }
-.loop-current-label { position: absolute; top: -28px; left: 50%; transform: translateX(-50%); padding: 4px 10px; border: 1px solid color-mix(in srgb, var(--loop-metal-soft) 80%, transparent); border-radius: 12px; background: linear-gradient(120deg, #9aa6b5, #e8edf3 48%, #bec8d3); box-shadow: 0 2px 8px color-mix(in srgb, var(--loop-metal) 15%, transparent); color: #263341; font-size: 9px; font-weight: 600; white-space: nowrap; }
-.loop-node.waiting .loop-current-label { background: var(--loop-wait); color: #342716; }
-.loop-node.failed .loop-current-label { background: var(--loop-error); color: #321919; }
-.loop-node.paused .loop-current-label, .loop-node.unknown .loop-current-label { background: #a6b3c5; color: #1d2837; }
-.loop-node strong { font-size: 13px; line-height: 1.4; margin: 9px 0 7px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.loop-node-kind, .loop-node small { color: var(--muted); font-size: 10px; }
+.loop-current-label { position: absolute; top: -29px; left: 50%; transform: translateX(-50%); padding: 4px 10px; border: 1px solid currentColor; border-radius: 6px; background: var(--surface-raised); color: var(--loop-active); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.loop-node.waiting .loop-current-label { color: var(--loop-wait); }
+.loop-node.failed .loop-current-label { color: var(--loop-error); }
+.loop-node.paused .loop-current-label, .loop-node.unknown .loop-current-label { color: var(--muted); }
+.loop-node strong { font-size: 14px; line-height: 1.4; margin: 9px 0 7px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.loop-node-kind, .loop-node small { color: var(--muted); font-size: 12px; }
 .loop-node small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 100%; }
-.loop-node-state { display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 10px; color: var(--muted); font-size: 10px; }
+.loop-node-state { display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 7px; color: var(--muted); font-size: 12px; }
 .loop-node-state i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .loop-node.running .loop-node-state { color: var(--loop-active); }
 .loop-node.completed .loop-node-state { color: var(--loop-done); }
 .loop-node.waiting .loop-node-state { color: var(--loop-wait); }
 .loop-node.failed .loop-node-state { color: var(--loop-error); }
-.loop-legend { display: flex; flex-wrap: wrap; gap: 16px; padding: 12px 14px; border-top: 1px solid var(--border); font-size: 10px; color: var(--muted); }
+.loop-legend { display: flex; flex-wrap: wrap; gap: 16px; padding: 12px 14px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
 .loop-legend span { display: flex; align-items: center; gap: 6px; }
 .loop-legend i { display: inline-block; width: 18px; border-top: 2px solid var(--border-strong); }
 .loop-legend i.active { border-color: var(--loop-active); }
@@ -198,18 +194,16 @@ onBeforeUnmount(() => { observer?.disconnect(); document.removeEventListener('vi
 .loop-legend i.pending { border-top-style: dashed; }
 .loop-inspector { padding: 20px; border-left: 1px solid var(--border); max-height: 490px; overflow: auto; }
 .loop-inspector h3 { font-size: 16px; margin: 12px 0; }
-.loop-inspector-state { display: inline-block; padding: 4px 8px; border: 1px solid var(--border); border-radius: 20px; font-size: 10px; color: var(--muted); }
+.loop-inspector-state { display: inline-block; padding: 4px 8px; border: 1px solid var(--border); border-radius: 20px; font-size: 12px; color: var(--muted); }
 .loop-inspector-state.running { color: var(--loop-active); }
 .loop-inspector-state.completed { color: var(--loop-done); }
 .loop-inspector-state.waiting { color: var(--loop-wait); }
-.loop-inspector h4 { margin: 20px 0 8px; font-size: 11px; color: var(--muted); }
-.loop-inspector p, .loop-inspector li { font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.loop-inspector h4 { margin: 20px 0 8px; font-size: 12px; color: var(--muted); }
+.loop-inspector p, .loop-inspector li { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .loop-inspector ul { margin: 0; padding-left: 16px; }
 .loop-inspector > .button { margin-top: 18px; }
 .loop-budget { padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted); }
-@keyframes loop-metallic-reflection { to { --loom-loop-reflection-angle: 360deg; } }
-@keyframes loop-wait { 50% { opacity: .65; } }
-@media (prefers-reduced-motion: reduce) { .loop-effects .loop-node::after { animation: none; } .loop-progress-track i, .loop-node { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .loop-progress-track i, .loop-node { transition: none; } }
 @media (max-width: 1100px) { .loop-body { grid-template-columns: minmax(0, 1fr); } .loop-inspector { border-left: 0; border-top: 1px solid var(--border); max-height: 280px; } }
 @media (max-width: 700px) { .real-loop { padding: 14px; } .real-loop > header { flex-direction: column; align-items: flex-start; } .loop-live { flex-wrap: wrap; } .loop-completion { width: 100%; } .loop-canvas { height: 310px; } }
 </style>

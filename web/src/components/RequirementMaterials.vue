@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Download, FileText, Pencil, RefreshCw } from '@lucide/vue'
+import { Download, FileText, Pencil, RefreshCw, MessageSquare } from '@lucide/vue'
 import { request } from '../api'
 import { useI18n } from '../i18n'
 import type { MaterialCatalog, MaterialDetail, MaterialKind, Project, Requirement, RequirementMaterial } from '../types'
@@ -8,7 +8,7 @@ import StreamingMarkdown from './StreamingMarkdown.vue'
 import PrototypePreview from './PrototypePreview.vue'
 
 const props = defineProps<{ requirement: Requirement; project?: Project; kind: MaterialKind; empty: string; refreshKey: number; writers?: { sessionId: string; directory: string }[] }>()
-const emit = defineEmits<{ busy: [value: boolean] }>()
+const emit = defineEmits<{ busy: [value: boolean]; generate: [] }>()
 const { t, errorMessage } = useI18n()
 const catalog = ref<MaterialCatalog>()
 const detail = ref<MaterialDetail>()
@@ -138,7 +138,7 @@ onBeforeUnmount(() => { ++revision })
       <ul v-if="files.length" class="material-list">
         <li v-for="file in files" :key="file.id"><button :class="{ selected: detail?.id === file.id }" :disabled="saving" @click="select(file)"><FileText :size="15" /><span>{{ file.path.split('/').at(-1) }}</span><small v-if="drafts.has(`${selectionKey()}:${file.id}`)">{{ t('materials.draft') }}</small></button></li>
       </ul>
-      <div v-else-if="catalog" class="content-empty"><FileText :size="28" aria-hidden="true" /><p>{{ empty }}</p><p class="subtle">{{ t(kind === 'prototypes' ? 'prototype.aiHint' : 'materials.aiHint') }}</p></div>
+      <div v-else-if="catalog" class="content-empty"><FileText :size="28" aria-hidden="true" /><p>{{ empty }}</p><p class="subtle">{{ t(kind === 'prototypes' ? 'prototype.aiHint' : 'materials.aiHint') }}</p><button class="button" @click="emit('generate')"><MessageSquare :size="16" aria-hidden="true" />{{ t('materials.openConversation') }}</button></div>
       <div v-if="detail" class="material-detail">
         <form @submit.prevent="save">
           <div class="material-detail-heading"><code>{{ detail.path.split('/').at(-1) }}</code><div><a :href="download" class="icon-button" :aria-label="t('materials.download')"><Download :size="15" /></a><button v-if="!editing && detail.editable" type="button" class="icon-button" :disabled="saving || writerBusy" :aria-label="t('materials.edit')" @click="editing = true; success = ''"><Pencil :size="15" /></button></div></div>

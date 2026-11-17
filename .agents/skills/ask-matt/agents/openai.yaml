@@ -1,5 +1,5 @@
 interface:
   display_name: "Ask Matt"
-  short_description: "Find the right skill or workflow"
+  short_description: "Choose a workflow proportional to the task"
 policy:
   allow_implicit_invocation: false

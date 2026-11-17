@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { ArrowUp, MessageSquare, RefreshCw, Square } from '@lucide/vue'
+import { ArrowUp, MessageSquare, RefreshCw, Square, CircleAlert } from '@lucide/vue'
 import { request } from '../api'
 import { useWorkspace } from '../composables/useWorkspace'
 import { shouldSendTask } from '../composables/composerKeyboard'
@@ -28,6 +28,10 @@ const draft = ref('')
 const requestId = ref('')
 const draftKey = `loom.requirement.draft.${props.requirement.id}`
 const inputId = `requirement-${props.requirement.id}-message`
+const preparation = ref<InstanceType<typeof RequirementWorkflow>>()
+const attention = computed(() => props.workflow.stale ? 'workflow.attentionStale' : props.workflow.workflow?.state === 'questions' ? 'workflow.attentionQuestions' : props.workflow.workflow?.state === 'review' ? 'workflow.attentionReview' : props.workflow.workflow?.state === 'failed' ? 'workflow.attentionFailed' : undefined)
+function focusComposer() { document.getElementById(inputId)?.focus({ preventScroll: true }) }
+defineExpose({ focusComposer })
 try {
   const saved = JSON.parse(localStorage.getItem(draftKey) ?? '{}')
   draft.value = typeof saved.text === 'string' ? saved.text : ''
@@ -103,13 +107,12 @@ const timeline = ref<HTMLElement>()
 const conversation = ref<HTMLElement>()
 const follow = ref(true)
 const newOutput = ref(false)
-watch(() => props.workflow.workflow?.state, state => {
-  if (state && ['questions', 'review', 'preview', 'failed', 'cancelled'].includes(state)) {
-    follow.value = false
-    void nextTick(() => { if (timeline.value) timeline.value.scrollTop = 0; newOutput.value = false })
-  }
-}, { immediate: true })
-function showPreparation() { follow.value = false; if (timeline.value) timeline.value.scrollTop = 0; newOutput.value = false }
+watch(attention, value => { if (value) follow.value = false }, { immediate: true })
+function showPreparation() {
+  follow.value = false
+  preparation.value?.expand()
+  void nextTick(() => { if (timeline.value) timeline.value.scrollTop = 0 })
+}
 let scrollFrame = 0
 function scrollToBottom() {
   follow.value = true
@@ -136,9 +139,10 @@ onBeforeUnmount(() => { observer.disconnect(); cancelAnimationFrame(scrollFrame)
   <section class="requirement-chat" :aria-label="t('requirement.chat')">
     <header class="requirement-chat-heading"><h2><MessageSquare :size="17" aria-hidden="true" />{{ t('requirement.chat') }}</h2><button v-if="workflow.workflow" class="button" @click="showPreparation">{{ t('workflow.viewProgress') }}</button><small v-if="sessionId && endpoint">{{ endpoint.name }}</small><RequirementModels :catalog="snapshot.modelCatalog" @manage-models="emit('manageModels')" v-if="project" :visible="visible" :project="snapshot.projects.find(value => value.id === project?.id) ?? project" :requirement="snapshot.requirements.find(value => value.id === requirement.id) ?? requirement" :endpoints="snapshot.endpoints" :endpoint="endpoint" :active-model="activeTurn?.model ?? detail?.session.model" :active="Boolean(activeTurn)" :disabled="!online || busy || sending" :refresh="refresh" @busy="modelBusy = $event" /><SessionPermissions :value="accessMode" :active="Boolean(activeTurn)" :active-mode="activeTurn?.accessMode" :disabled="!online || busy || sending" :save="savePermissions" @busy="permissionBusy = $event" /><p>{{ t('requirement.chatSection', { section: sectionLabel }) }}</p></header>
     <div v-if="!sessionId && agents.length > 1" class="requirement-chat-agent"><label :for="`${inputId}-agent`">{{ t('requirement.chatAgent') }}</label><select :id="`${inputId}-agent`" v-model="selectedEndpoint" class="text-field" :disabled="sending"><option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }}</option></select></div>
+    <div v-if="attention" class="preparation-attention" :class="{ failed: workflow.workflow?.state === 'failed' }" role="status"><CircleAlert :size="17" aria-hidden="true" /><span>{{ t(attention) }}</span><button class="button quiet" @click="showPreparation">{{ t('workflow.viewProgress') }}</button></div>
     <div ref="timeline" class="requirement-chat-timeline" @scroll="trackScroll">
       <div ref="conversation">
-        <RequirementWorkflow :detail="workflow" :busy="workflowBusy" :error="workflowError" :act="workflowAction" view="chat" :brief="draft" :endpoint-id="endpoint?.id" :can-start="canSend" @navigate="emit('navigate', $event)" />
+        <RequirementWorkflow ref="preparation" compact :session-state="detail?.session.state" :detail="workflow" :busy="workflowBusy" :error="workflowError" :act="workflowAction" view="chat" :brief="draft" :endpoint-id="endpoint?.id" :can-start="canSend" @navigate="emit('navigate', $event)" />
         <p v-if="loading" class="subtle">{{ t('welcome.loading') }}</p>
         <p v-else-if="!detail?.entries.length" class="requirement-chat-empty">{{ t('requirement.chatEmpty') }}</p>
         <EntryCard v-for="entry in detail?.entries ?? []" :key="entry.id" :entry="entry" :agent-name="agentName" />

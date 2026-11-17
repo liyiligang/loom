@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import { useWorkflowAnswers } from '../composables/workflowAnswers'
-import { Check, LoaderCircle, Sparkles, ArrowRight } from '@lucide/vue'
+import { Check, LoaderCircle, Sparkles, ArrowRight, ChevronDown } from '@lucide/vue'
+import { loopProgress } from '../composables/loopProgress'
 import { useI18n } from '../i18n'
 import type { MaterialKind, WorkflowAction, WorkflowDetail } from '../types'
 import StreamingMarkdown from './StreamingMarkdown.vue'
 
-const props = defineProps<{ detail: WorkflowDetail; busy: boolean; error?: unknown; act: (input: WorkflowAction) => Promise<boolean>; view: 'chat' | 'grill'; brief?: string; endpointId?: string; canStart?: boolean }>()
+const props = defineProps<{ detail: WorkflowDetail; busy: boolean; error?: unknown; act: (input: WorkflowAction) => Promise<boolean>; view: 'chat' | 'grill'; brief?: string; endpointId?: string; canStart?: boolean; compact?: boolean; sessionState?: string }>()
 const emit = defineEmits<{ navigate: [value: MaterialKind | 'chat'] }>()
 const { t, errorMessage } = useI18n()
 const workflow = computed(() => props.detail.workflow)
+const bodyId = useId()
+const expanded = ref(!props.compact)
+watch(() => workflow.value?.state, state => { if (state === 'questions' || state === 'review') expanded.value = true }, { immediate: true })
+const progress = computed(() => loopProgress(workflow.value, props.sessionState))
+defineExpose({ expand: () => { expanded.value = true } })
 const active = computed(() => ['pending', 'running'].includes(workflow.value?.state ?? ''))
 const revision = ref('')
 const { answers, save: saveAnswers, clear: clearAnswers } = useWorkflowAnswers(() => workflow.value?.id ?? '')
@@ -20,7 +26,7 @@ const steps = computed(() => [
   { stage: 'alignment', label: t('workflow.alignment'), tab: 'chat' as const },
   { stage: 'confirmation', label: t('workflow.confirmation'), tab: 'chat' as const },
   { stage: 'loop', label: t('requirement.loopDesign'), tab: 'loopDesign' as const },
-])
+] as const)
 const currentStep = computed(() => workflow.value?.state === 'review' ? 4 : steps.value.findIndex(step => step.stage === workflow.value?.stage))
 const answered = computed(() => workflow.value?.questions.every(question => answers.value[question.id]?.trim()))
 async function submitAnswers() {
@@ -33,8 +39,12 @@ async function revise() { if (await props.act({ action: 'revise', brief: revisio
 
 <template>
   <section class="preparation" :aria-label="t('workflow.title')" :aria-busy="busy">
-    <header><div><span class="preparation-eyebrow"><Sparkles :size="13" aria-hidden="true" />{{ t('workflow.eyebrow') }}</span><h3>{{ t('workflow.title') }}</h3></div><span v-if="workflow" class="preparation-state">{{ t(`workflow.state.${workflow.state}`) }}</span></header>
-    <ol class="preparation-steps"><li v-for="(step, index) in steps" :key="step.stage" :class="{ current: index === currentStep, done: index < currentStep || workflow?.state === 'preview' }"><button :aria-current="index === currentStep ? 'step' : undefined" @click="emit('navigate', step.tab)"><span><Check v-if="index < currentStep || workflow?.state === 'preview'" :size="12" /><template v-else>{{ index + 1 }}</template></span>{{ step.label }}</button></li></ol>
+    <header><div><span class="preparation-eyebrow"><Sparkles :size="13" aria-hidden="true" />{{ t('workflow.eyebrow') }}</span><h3>{{ t('workflow.title') }}</h3></div><div class="preparation-heading-actions"><span v-if="workflow" class="preparation-state">{{ t(`workflow.state.${workflow.state}`) }}</span><button v-if="compact" type="button" class="button quiet" :aria-expanded="expanded" :aria-controls="bodyId" @click="expanded = !expanded">{{ t(expanded ? 'workflow.hideDetails' : 'workflow.showDetails') }}<ChevronDown :size="14" :class="{ 'preparation-chevron-open': expanded }" /></button></div></header>
+    <p v-if="workflow && !expanded" class="preparation-summary">{{ t('workflow.compactSummary', { stage: steps[currentStep]?.label ?? t('workflow.title'), completed: progress.completed, total: steps.length }) }}</p>
+    <p v-if="!workflow && compact && !expanded" class="preparation-summary">{{ t('workflow.startHint') }}</p>
+    <p v-if="error && !expanded" class="form-error" role="alert">{{ errorMessage(error, 'workflow.actionError') }}</p>
+    <div v-show="expanded || !compact" :id="bodyId" class="preparation-body">
+    <ol class="preparation-steps"><li v-for="(step, index) in steps" :key="step.stage" :class="{ current: index === currentStep, done: progress.states.get(step.stage) === 'completed' }"><button :aria-current="index === currentStep ? 'step' : undefined" @click="emit('navigate', step.tab)"><span><Check v-if="progress.states.get(step.stage) === 'completed'" :size="12" /><template v-else>{{ index + 1 }}</template></span>{{ step.label }}</button></li></ol>
     <p v-if="!workflow || workflow.state === 'cancelled'" class="subtle">{{ t('workflow.startHint') }}</p>
     <p v-if="active" class="preparation-running" role="status"><LoaderCircle :size="15" class="preparation-spinner" aria-hidden="true" />{{ t('workflow.runningHint') }}</p>
     <p v-if="detail.stale && !active" class="form-error" role="status">{{ t('workflow.stale') }}</p>
@@ -52,7 +62,8 @@ async function revise() { if (await props.act({ action: 'revise', brief: revisio
     </div>
     <div v-if="workflow?.state === 'preview'" class="preparation-preview"><p>{{ t('workflow.previewHint') }}</p><button class="button primary" @click="emit('navigate', 'loopDesign')">{{ t('workflow.openPreview') }}<ArrowRight :size="14" /></button></div>
     <form v-if="workflow && ['review', 'preview', 'failed'].includes(workflow.state) && view === 'chat'" class="preparation-revise" @submit.prevent="revise"><label :for="`revision-${workflow.id}`">{{ t('workflow.reviseLabel') }}</label><div><input :id="`revision-${workflow.id}`" v-model="revision" class="text-field" maxlength="32768" :placeholder="t('workflow.revisePlaceholder')" :disabled="busy" /><button class="button" :disabled="busy || !revision.trim()">{{ t('workflow.revise') }}</button></div></form>
-    <footer>
+    </div>
+    <footer v-if="expanded || !compact || !workflow">
       <button v-if="workflow?.state === 'cancelled' && workflow.pausedState" class="button primary" :disabled="busy || detail.stale" @click="act({ action: 'resume' })">{{ t('workflow.resume') }}<ArrowRight :size="14" /></button>
       <button v-if="view === 'chat' && !active && workflow?.state !== 'questions' && workflow?.state !== 'review'" class="button" :class="{ primary: !workflow || workflow.state === 'cancelled' }" :disabled="busy || !canStart" @click="act({ action: 'start', brief, endpointId })"><Sparkles :size="14" />{{ workflow && workflow.state !== 'cancelled' ? t('workflow.restart') : t('workflow.start') }}</button>
       <button v-if="workflow?.state === 'failed'" class="button" :disabled="busy || detail.stale" @click="act({ action: 'retry' })">{{ t('workflow.retry') }}</button>
@@ -63,17 +74,21 @@ async function revise() { if (await props.act({ action: 'revise', brief: revisio
 </template>
 
 <style scoped>
-.preparation { margin: 0 0 20px; padding: 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-subtle); font-size: 13px; }
+.preparation { margin: 0 0 20px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-subtle); font-size: 14px; }
 .preparation header { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
-.preparation-eyebrow { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; letter-spacing: .12em; }
+.preparation-eyebrow { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
 .preparation h3 { margin: 8px 0 0; font-size: 17px; font-weight: 600; }
-.preparation-state { padding: 5px 10px; border: 1px solid var(--border); border-radius: 20px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.preparation-state { padding: 5px 10px; border: 1px solid var(--border); border-radius: 20px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.preparation-heading-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px; }
+.preparation-heading-actions .button { font-size: 12px; }
+.preparation-chevron-open { transform: rotate(180deg); }
+.preparation-summary { margin: 12px 0 0; color: var(--muted); font-size: 13px; }
 .preparation-steps { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0; margin: 18px 0; list-style: none; }
-.preparation-steps button { display: flex; align-items: center; gap: 6px; background: transparent; border: 0; padding: 4px 0; font: inherit; font-size: 11px; color: var(--muted); }
+.preparation-steps button { display: flex; align-items: center; gap: 6px; background: transparent; border: 0; padding: 6px 0; font: inherit; font-size: 12px; color: var(--muted); }
 .preparation-steps span { display: grid; place-items: center; width: 21px; height: 21px; border: 1px solid var(--border); border-radius: 50%; }
 .preparation-steps .current button { color: var(--text); font-weight: 600; }
 .preparation-steps .current span { background: var(--accent); color: var(--surface); border-color: var(--accent); }
-.preparation-steps .done span { color: #22856c; border-color: #77b7a0; }
+.preparation-steps .done span { color: var(--success); border-color: var(--success); }
 .preparation p { line-height: 1.7; }
 .preparation-running { display: flex; align-items: center; gap: 8px; color: var(--muted); }
 .preparation-spinner { flex-shrink: 0; animation: preparation-spin 1.5s linear infinite; }
@@ -90,4 +105,5 @@ async function revise() { if (await props.act({ action: 'revise', brief: revisio
 .preparation-revise input { flex: 1; min-width: 0; }
 @keyframes preparation-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .preparation-spinner { animation: none; } }
+@media (max-width: 620px) { .preparation header { align-items: flex-start; flex-wrap: wrap; } .preparation-heading-actions { justify-content: flex-start; } }
 </style>

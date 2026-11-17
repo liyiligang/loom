@@ -24,13 +24,20 @@ func TestCreateAndUpdatePreserveSourceAndAssets(t *testing.T) {
 	if err := os.Chmod(file, 0600); err != nil {
 		t.Fatal(err)
 	}
+	beforeInfo, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
 	updated := strings.Replace(source, "Keep this workflow.", "Updated workflow.", 1)
 	after, err := Update(ctx, root, detail.ID, updated, detail.Hash)
 	if err != nil || after.Source != updated || after.ID != detail.ID {
 		t.Fatalf("update: %+v %v", after, err)
 	}
-	info, _ := os.Stat(file)
-	if info.Mode().Perm() != 0600 {
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != beforeInfo.Mode().Perm() {
 		t.Fatal("update changed existing file permissions")
 	}
 	if raw, err := os.ReadFile(asset); err != nil || string(raw) != "Keep supporting file" {

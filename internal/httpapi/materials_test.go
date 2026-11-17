@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -215,7 +216,11 @@ func TestMaterialsFollowWorktreeAndSerializeWithRequirementAI(t *testing.T) {
 	f.call("POST", "/requirements/"+id+"/conversation/turns", map[string]any{"text": "Review the revised branch", "clientRequestId": "materials-second", "section": "designDocuments"}, 202, &next)
 	eventually(t, func() bool { return f.snapshot(discussion.SessionID).Turns[1].ProviderID != "" })
 	after := f.snapshot(discussion.SessionID)
-	if next.SessionID != discussion.SessionID || after.Session.MaterialDirectory != second.Workspace.Directory || !strings.Contains(after.Turns[1].Context, second.Workspace.Directory) || !strings.Contains(after.Turns[1].Context, `"branch":"feature/materials-second"`) {
+	encodedDirectory, err := json.Marshal(second.Workspace.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.SessionID != discussion.SessionID || after.Session.MaterialDirectory != second.Workspace.Directory || !strings.Contains(after.Turns[1].Context, string(encodedDirectory)) || !strings.Contains(after.Turns[1].Context, `"branch":"feature/materials-second"`) {
 		t.Fatal("next discussion turn did not select the revised branch")
 	}
 	f.native.finish(after.Session.ProviderID, after.Turns[1].ProviderID, "completed", "Reviewed second design")

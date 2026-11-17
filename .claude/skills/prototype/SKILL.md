@@ -7,6 +7,8 @@ description: Build a throwaway prototype to answer a design question. Use when t
 
 A prototype is **throwaway code that answers a question**. The question decides the shape.
 
+Read the [project workflow](../../../docs/agents/workflow.md). When Loom supplies a requirement material root, save an authorized prototype as a self-contained HTML file in its `prototypes/` category, with inline CSS/JavaScript and sample data for the isolated preview. UI variants can switch inside that file. Preserve the fixed workspace and existing spec; standalone route edits and branch capture below do not apply to this material workflow. A preparation stage that does not authorize prototypes must stay within its supplied artifacts.
+
 ## Pick a branch
 
 Identify which question is being answered, using the user's prompt, the surrounding code, or by asking if the user is around:
